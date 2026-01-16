@@ -1,0 +1,32 @@
+@use '../utils/variables.scss' as *;
+@use '../utils/utils.scss' as *;
+
+html {
+  height: stretch;
+  overflow: hidden;
+  color: $text-color-primary;
+  background: transparent;
+  text-size-adjust: 100%;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  font-family: $font-family-default;
+  font-size: em($font-size-default);
+  font-weight: 400;
+  line-height: 1;
+}
+
+/* stylelint-disable-next-line selector-id-pattern */
+#__nuxt {
+  display: flex;
+  flex-grow: 1;
+  flex-direction: column;
+}
+
+#app {
+  flex-grow: 1;
+}

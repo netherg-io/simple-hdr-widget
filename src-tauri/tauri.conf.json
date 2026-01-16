@@ -1,0 +1,37 @@
+{
+  "productName": "hdr-widget",
+  "version": "0.1.0",
+  "identifier": "com.hdr.widget",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "yarn dev",
+    "beforeBuildCommand": "yarn generate"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "HDR Switcher",
+        "width": 140,
+        "height": 60,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "center": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png"
+    ]
+  }
+}

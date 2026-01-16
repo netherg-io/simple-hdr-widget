@@ -45,17 +45,7 @@ async fn check_hdr_status() -> Result<bool, String> {
 #[command]
 async fn init_position(window: Window) {
     let _ = window.set_shadow(false);
-    let _ = window.move_window(Position::BottomRight);
-
-    if let Ok(_pos) = window.outer_position() {
-        let new_x = 0;
-        let new_y = 0;
-
-        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-            x: new_x,
-            y: new_y,
-        }));
-    }
+    let _ = window.move_window(Position::TopRight);
 }
 
 fn main() {

@@ -7,6 +7,9 @@ const isLoading = ref(false);
 const errorMsg = ref('');
 
 const isDragging = ref(false);
+const hasDragged = ref(false);
+const dragStartScreenX = ref(0);
+const dragStartScreenY = ref(0);
 const dragOffsetX = ref(0);
 const dragOffsetY = ref(0);
 const isMoving = ref(false);
@@ -15,15 +18,15 @@ const startDrag = async (e) => {
   if (e.button !== 0) return;
 
   const win = getCurrentWindow();
-
   const factor = await win.scaleFactor();
-
   const physicalPos = await win.outerPosition();
   const logicalPos = physicalPos.toLogical(factor);
 
   dragOffsetX.value = e.screenX - logicalPos.x;
   dragOffsetY.value = e.screenY - logicalPos.y;
-
+  dragStartScreenX.value = e.screenX;
+  dragStartScreenY.value = e.screenY;
+  hasDragged.value = false;
   isDragging.value = true;
 
   document.addEventListener('mousemove', onDragMove);
@@ -32,6 +35,15 @@ const startDrag = async (e) => {
 
 const onDragMove = async (e) => {
   if (!isDragging.value || isMoving.value) return;
+
+  const dist = Math.hypot(
+    e.screenX - dragStartScreenX.value,
+    e.screenY - dragStartScreenY.value,
+  );
+  if (dist > 3) {
+    hasDragged.value = true;
+  }
+
   isMoving.value = true;
 
   try {
@@ -53,11 +65,23 @@ const onDragMove = async (e) => {
   }
 };
 
-const stopDrag = () => {
+const stopDrag = async () => {
   isDragging.value = false;
 
   document.removeEventListener('mousemove', onDragMove);
   document.removeEventListener('mouseup', stopDrag);
+
+  try {
+    const win = getCurrentWindow();
+    const factor = await win.scaleFactor();
+    const physicalPos = await win.outerPosition();
+    const logicalPos = physicalPos.toLogical(factor);
+
+    localStorage.setItem('hdr_widget_x', logicalPos.x.toString());
+    localStorage.setItem('hdr_widget_y', logicalPos.y.toString());
+  } catch (e) {
+    console.error('Failed to save position', e);
+  }
 };
 
 const checkStatus = async () => {
@@ -69,6 +93,8 @@ const checkStatus = async () => {
 };
 
 const toggleHdr = async () => {
+  if (hasDragged.value) return;
+
   if (isLoading.value) return;
   isLoading.value = true;
   try {
@@ -85,12 +111,24 @@ const toggleHdr = async () => {
 
 onMounted(async () => {
   await checkStatus();
+
   setTimeout(async () => {
     try {
-      await invoke('init_position');
+      const savedX = localStorage.getItem('hdr_widget_x');
+      const savedY = localStorage.getItem('hdr_widget_y');
+
+      if (savedX !== null && savedY !== null) {
+        await getCurrentWindow().setPosition(
+          new LogicalPosition(parseFloat(savedX), parseFloat(savedY)),
+        );
+      } else {
+        await invoke('init_position');
+      }
+
       await getCurrentWindow().show();
       await getCurrentWindow().setFocus();
-    } catch {
+    } catch (e) {
+      console.error(e);
       await getCurrentWindow().show();
     }
   }, 100);

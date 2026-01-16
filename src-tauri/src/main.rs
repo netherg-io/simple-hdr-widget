@@ -1,60 +1,262 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-use std::os::windows::process::CommandExt;
-use std::process::Command;
-use tauri::{command, Window};
+use std::mem;
+use std::time::Duration;
+use tauri::{command, Emitter, Manager, WebviewWindow};
 use tauri_plugin_positioner::{Position, WindowExt};
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+use windows::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
+    QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    QDC_ONLY_ACTIVE_PATHS,
+};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, POINT, RECT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetWindowLongW, GetWindowRect, SetWindowLongW, SetWindowPos, GWL_EXSTYLE,
+    HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+};
+
+const SET_ADVANCED_COLOR_STATE_VAL: i32 = 10;
+const ENABLE_FLAG: u32 = 0x1;
+
+#[derive(Clone, serde::Serialize)]
+struct HdrStatusPayload {
+    enabled: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DisplayConfigSetAdvancedColorState {
+    pub header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    pub value: u32,
+}
+
+fn get_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
+    let mut path_count = 0;
+    let mut mode_count = 0;
+
+    let result = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    };
+
+    if result != ERROR_SUCCESS {
+        return Err(format!("GetDisplayConfigBufferSizes failed: {:?}", result));
+    }
+
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+
+    let result = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    };
+
+    if result != ERROR_SUCCESS {
+        return Err(format!("QueryDisplayConfig failed: {:?}", result));
+    }
+
+    paths.truncate(path_count as usize);
+    Ok(paths)
+}
+
+fn get_hdr_status_internal() -> bool {
+    if let Ok(paths) = get_active_paths() {
+        for path in paths {
+            let mut get_packet = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                    size: mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                },
+                ..Default::default()
+            };
+
+            let ret =
+                unsafe { DisplayConfigGetDeviceInfo(&mut get_packet.header as *mut _ as *mut _) };
+
+            if ret == ERROR_SUCCESS.0 as i32 {
+                let enabled = unsafe { (get_packet.Anonymous.value & 0x2) != 0 };
+                if enabled {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn start_mouse_tracking(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
+
+        let hwnd = HWND(tauri_hwnd.0 as *mut _);
+
+        let mut was_inside = false;
+
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+
+            unsafe {
+                let mut cursor_pos = POINT::default();
+                let mut win_rect = RECT::default();
+
+                if GetCursorPos(&mut cursor_pos).is_err() {
+                    continue;
+                }
+                if GetWindowRect(hwnd, &mut win_rect).is_err() {
+                    continue;
+                }
+
+                let is_inside = cursor_pos.x >= win_rect.left
+                    && cursor_pos.x <= win_rect.right
+                    && cursor_pos.y >= win_rect.top
+                    && cursor_pos.y <= win_rect.bottom;
+
+                if is_inside != was_inside {
+                    was_inside = is_inside;
+                    if !is_inside {
+                        let _ = window.emit("mouse-left-window", ());
+                    }
+                }
+            }
+        }
+    });
+}
 
 #[command]
-fn toggle_hdr() -> Result<String, String> {
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+async fn toggle_hdr(enable: bool) -> Result<String, String> {
+    let paths = get_active_paths()?;
+    let mut log = String::new();
+    let mut success_any = false;
 
-    enigo.key(Key::Meta, Direction::Press).map_err(|e| e.to_string())?;
-    enigo.key(Key::Alt, Direction::Press).map_err(|e| e.to_string())?;
-    enigo.key(Key::Unicode('b'), Direction::Click).map_err(|e| e.to_string())?;
-    enigo.key(Key::Alt, Direction::Release).map_err(|e| e.to_string())?;
-    enigo.key(Key::Meta, Direction::Release).map_err(|e| e.to_string())?;
+    for path in paths {
+        let mut set_packet = DisplayConfigSetAdvancedColorState {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_TYPE(SET_ADVANCED_COLOR_STATE_VAL),
+                size: mem::size_of::<DisplayConfigSetAdvancedColorState>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            value: if enable { ENABLE_FLAG } else { 0 },
+        };
 
-    Ok("HDR Toggle command sent".into())
+        let ret = unsafe { DisplayConfigSetDeviceInfo(&mut set_packet.header as *mut _ as *mut _) };
+
+        if ret == ERROR_SUCCESS.0 as i32 {
+            success_any = true;
+            log.push_str(&format!("Success for ID {}\n", path.targetInfo.id));
+        } else {
+            log.push_str(&format!("Error {} for ID {}\n", ret, path.targetInfo.id));
+        }
+    }
+
+    if success_any {
+        Ok(log)
+    } else {
+        Err(log)
+    }
 }
 
 #[command]
 async fn check_hdr_status() -> Result<bool, String> {
-    let output = Command::new("powershell")
-        .args(&[
-            "-NoProfile",
-            "-Command",
-            r#"
-            # Get HDR status from registry (User GameConfigStore)
-            $status = (Get-ItemProperty HKCU:\System\GameConfigStore -Name "HDREnabled" -ErrorAction SilentlyContinue).HDREnabled
-            if ($status -eq 1) { Write-Output "On" } else { Write-Output "Off" }
-            "#,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    Ok(result == "On")
+    Ok(get_hdr_status_internal())
 }
 
 #[command]
-async fn init_position(window: Window) {
-    let _ = window.set_shadow(false);
-    let _ = window.move_window(Position::TopRight);
+async fn apply_widget_styles(window: WebviewWindow) {
+    let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
+    let hwnd = HWND(tauri_hwnd.0 as *mut _);
+
+    unsafe {
+        let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        style &= !WS_EX_APPWINDOW.0 as i32;
+        style |= WS_EX_TOOLWINDOW.0 as i32;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[command]
+async fn move_widget(window: WebviewWindow, x: i32, y: i32) {
+    let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
+    let hwnd = HWND(tauri_hwnd.0 as *mut _);
+
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_BOTTOM),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[command]
+async fn init_position(window: WebviewWindow) {
+    let _ = window.as_ref().window().move_window(Position::BottomRight);
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+
+            tauri::async_runtime::spawn(async move {
+                let mut previous_state = get_hdr_status_internal();
+
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    let current_state = get_hdr_status_internal();
+
+                    if current_state != previous_state {
+                        previous_state = current_state;
+                        println!("HDR State changed to: {}", current_state);
+
+                        let _ = app_handle.emit(
+                            "hdr-state-changed",
+                            HdrStatusPayload {
+                                enabled: current_state,
+                            },
+                        );
+                    }
+                }
+            });
+
+            if let Some(window) = app.get_webview_window("main") {
+                start_mouse_tracking(window);
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             toggle_hdr,
             check_hdr_status,
-            init_position
+            init_position,
+            apply_widget_styles,
+            move_widget
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

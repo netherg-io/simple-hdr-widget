@@ -2,11 +2,10 @@
 
 use std::mem;
 use std::time::Duration;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::{command, Emitter, Manager, WebviewWindow};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{command, Emitter, Manager, Monitor, WebviewWindow, Wry};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_positioner::{Position, WindowExt};
 
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
@@ -246,8 +245,61 @@ async fn move_widget(window: WebviewWindow, x: i32, y: i32, is_pinned: bool) {
 }
 
 #[command]
-async fn init_position(window: WebviewWindow) {
-    let _ = window.as_ref().window().move_window(Position::BottomRight);
+async fn restore_window(
+    window: WebviewWindow,
+    saved_monitor_name: Option<String>,
+    saved_x: Option<f64>,
+    saved_y: Option<f64>,
+) {
+    let monitors = window.available_monitors().unwrap_or_default();
+    let mut target_monitor = None;
+
+    if let Some(name) = saved_monitor_name {
+        target_monitor = monitors
+            .iter()
+            .find(|m| m.name().map(|n| n.to_string()).unwrap_or_default() == name)
+            .cloned();
+    }
+
+    if target_monitor.is_none() {
+        target_monitor = window.primary_monitor().ok().flatten();
+    }
+    if target_monitor.is_none() {
+        target_monitor = monitors.first().cloned();
+    }
+
+    if let Some(m) = target_monitor {
+        let scale = m.scale_factor();
+
+        if let (Some(x), Some(y)) = (saved_x, saved_y) {
+            let phys_x = (x * scale).round() as i32;
+            let phys_y = (y * scale).round() as i32;
+
+            let _ = window.set_position(tauri::PhysicalPosition::new(phys_x, phys_y));
+        } else {
+            move_window_to_monitor(&window, &m);
+        }
+    }
+}
+
+fn move_window_to_monitor(window: &WebviewWindow, monitor: &Monitor) {
+    let monitor_pos = monitor.position();
+    let monitor_size = monitor.size();
+    let target_scale = monitor.scale_factor();
+
+    let window_size = window.outer_size().unwrap();
+    let current_scale = window.scale_factor().unwrap_or(1.0);
+
+    let logical_width = window_size.width as f64 / current_scale;
+
+    let predicted_width = (logical_width * target_scale).round() as i32;
+
+    const PADDING: i32 = 0;
+
+    let new_x = monitor_pos.x + (monitor_size.width as i32 - predicted_width) - PADDING;
+    let new_y = monitor_pos.y + PADDING;
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(new_x, new_y));
 }
 
 #[command]
@@ -259,6 +311,44 @@ async fn show_context_menu(
 ) {
     let autostart_manager = app.autolaunch();
     let is_autostart = autostart_manager.is_enabled().unwrap_or(false);
+
+    let monitors = window.available_monitors().unwrap_or_default();
+    let current_monitor = window.current_monitor().unwrap();
+
+    let current_monitor_name = current_monitor
+        .as_ref()
+        .and_then(|m| m.name().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let mut screen_items = vec![];
+
+    for (index, m) in monitors.iter().enumerate() {
+        let name = m
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Display {}", index + 1));
+
+        let is_current = name == current_monitor_name;
+
+        let item = CheckMenuItem::with_id(
+            &app,
+            format!("monitor_select_{}", index),
+            format!("Screen {} ({})", index + 1, name),
+            true,
+            is_current,
+            None::<&str>,
+        )
+        .unwrap();
+
+        screen_items.push(item);
+    }
+
+    let screen_refs: Vec<&dyn tauri::menu::IsMenuItem<Wry>> = screen_items
+        .iter()
+        .map(|i| i as &dyn tauri::menu::IsMenuItem<Wry>)
+        .collect();
+
+    let screens_submenu = Submenu::with_items(&app, "Move to Screen", true, &screen_refs).unwrap();
 
     let toggle_pin = CheckMenuItem::with_id(
         &app,
@@ -299,6 +389,7 @@ async fn show_context_menu(
         &[
             &toggle_pin,
             &toggle_drag,
+            &screens_submenu,
             &separator,
             &toggle_autostart,
             &kill_app,
@@ -316,27 +407,60 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle_pin" => {
-                let _ = app.emit("menu-toggle-pin", ());
-            }
-            "toggle_drag" => {
-                let _ = app.emit("menu-toggle-drag", ());
-            }
-            "toggle_autostart" => {
-                let manager = app.autolaunch();
-                if manager.is_enabled().unwrap_or(false) {
-                    let _ = manager.disable();
-                } else {
-                    let _ = manager.enable();
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+
+            if id.starts_with("monitor_select_") {
+                if let Ok(index) = id.replace("monitor_select_", "").parse::<usize>() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        if let Ok(monitors) = window.available_monitors() {
+                            if let Some(target_monitor) = monitors.get(index) {
+                                let target_name = target_monitor
+                                    .name()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default();
+
+                                if let Ok(Some(current_monitor)) = window.current_monitor() {
+                                    let current_name = current_monitor
+                                        .name()
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_default();
+                                    if current_name == target_name {
+                                        return;
+                                    }
+                                }
+
+                                move_window_to_monitor(&window, target_monitor);
+
+                                let _ = app.emit("monitor-changed", target_name);
+                            }
+                        }
+                    }
                 }
+                return;
             }
-            "kill_app" => app.exit(0),
-            _ => {}
+
+            match id {
+                "toggle_pin" => {
+                    let _ = app.emit("menu-toggle-pin", ());
+                }
+                "toggle_drag" => {
+                    let _ = app.emit("menu-toggle-drag", ());
+                }
+                "toggle_autostart" => {
+                    let manager = app.autolaunch();
+                    if manager.is_enabled().unwrap_or(false) {
+                        let _ = manager.disable();
+                    } else {
+                        let _ = manager.enable();
+                    }
+                }
+                "kill_app" => app.exit(0),
+                _ => {}
+            }
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
-
             tauri::async_runtime::spawn(async move {
                 let mut previous_state = get_hdr_status_internal();
 
@@ -362,17 +486,16 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 start_mouse_tracking(window);
             }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             toggle_hdr,
             check_hdr_status,
-            init_position,
-            setup_widget_window, // Убедись, что все твои команды тут
+            setup_widget_window,
             set_pin_state,
             move_widget,
-            show_context_menu
+            show_context_menu,
+            restore_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

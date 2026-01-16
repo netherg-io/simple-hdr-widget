@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export function useDraggable(isPinnedRef, isDragEnabledRef) {
   const isDragging = ref(false);
@@ -14,23 +14,6 @@ export function useDraggable(isPinnedRef, isDragEnabledRef) {
   const minPosY = ref(0);
   const maxPosX = ref(0);
   const maxPosY = ref(0);
-
-  const restorePosition = async () => {
-    try {
-      const savedX = localStorage.getItem('hdr_widget_x');
-      const savedY = localStorage.getItem('hdr_widget_y');
-
-      if (savedX !== null && savedY !== null) {
-        await getCurrentWindow().setPosition(
-          new LogicalPosition(parseFloat(savedX), parseFloat(savedY)),
-        );
-      } else {
-        await invoke('init_position');
-      }
-    } catch (e) {
-      console.error('Failed to restore position:', e);
-    }
-  };
 
   const onDragMove = async (e) => {
     if (!isDragging.value || isMoving.value) return;
@@ -123,10 +106,6 @@ export function useDraggable(isPinnedRef, isDragEnabledRef) {
     document.addEventListener('mousemove', onDragMove);
     document.addEventListener('mouseup', stopDrag);
   };
-
-  onMounted(() => {
-    setTimeout(restorePosition, 50);
-  });
 
   return {
     startDrag,

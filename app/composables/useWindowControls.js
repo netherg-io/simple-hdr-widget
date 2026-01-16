@@ -5,11 +5,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 export function useWindowControls() {
   const isPinned = useLocalStorage('is-pinned', () => false);
   const isDragEnabled = useLocalStorage('is-drag-enabled', () => true);
+  const savedMonitorName = useLocalStorage('saved-monitor-name', () => null);
 
   const isHovered = ref(false);
 
   let unlistenMenuPin = null;
-  let unlistenMenuDrag = null; // <--- Слушатель для драга
+  let unlistenMenuDrag = null;
+  let unlistenMonitorChange = null;
   let unlistenMouse = null;
 
   const togglePin = async () => {
@@ -26,6 +28,15 @@ export function useWindowControls() {
   };
 
   const initWindow = async () => {
+    const savedX = localStorage.getItem('hdr_widget_x');
+    const savedY = localStorage.getItem('hdr_widget_y');
+
+    await invoke('restore_window', {
+      savedMonitorName: savedMonitorName.value,
+      savedX: savedX ? parseFloat(savedX) : null,
+      savedY: savedY ? parseFloat(savedY) : null,
+    });
+
     await getCurrentWindow().show();
     await invoke('setup_widget_window');
     await invoke('set_pin_state', { pinned: isPinned.value });
@@ -38,6 +49,12 @@ export function useWindowControls() {
       isDragEnabled.value = !isDragEnabled.value;
     });
 
+    unlistenMonitorChange = await listen('monitor-changed', (event) => {
+      savedMonitorName.value = event.payload;
+      localStorage.removeItem('hdr_widget_x');
+      localStorage.removeItem('hdr_widget_y');
+    });
+
     unlistenMouse = await listen('mouse-left-window', () => {
       isHovered.value = false;
     });
@@ -48,6 +65,7 @@ export function useWindowControls() {
   onUnmounted(() => {
     if (unlistenMenuPin) unlistenMenuPin();
     if (unlistenMenuDrag) unlistenMenuDrag();
+    if (unlistenMonitorChange) unlistenMonitorChange();
     if (unlistenMouse) unlistenMouse();
   });
 

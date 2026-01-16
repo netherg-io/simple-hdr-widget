@@ -1,6 +1,6 @@
 <script setup>
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window'; // Не забудьте импортировать LogicalPosition
+import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
 
 const isHdrOn = ref(false);
 const isLoading = ref(false);
@@ -15,10 +15,14 @@ const startDrag = async (e) => {
   if (e.button !== 0) return;
 
   const win = getCurrentWindow();
-  const pos = await win.outerPosition();
 
-  dragOffsetX.value = e.screenX - pos.x;
-  dragOffsetY.value = e.screenY - pos.y;
+  const factor = await win.scaleFactor();
+
+  const physicalPos = await win.outerPosition();
+  const logicalPos = physicalPos.toLogical(factor);
+
+  dragOffsetX.value = e.screenX - logicalPos.x;
+  dragOffsetY.value = e.screenY - logicalPos.y;
 
   isDragging.value = true;
 
@@ -27,21 +31,17 @@ const startDrag = async (e) => {
 };
 
 const onDragMove = async (e) => {
-  if (!isDragging.value) return;
-
-  if (isMoving.value) return;
+  if (!isDragging.value || isMoving.value) return;
   isMoving.value = true;
 
   try {
     const screenW = window.screen.availWidth;
     const screenH = window.screen.availHeight;
-
     const widgetW = 140;
     const widgetH = 60;
 
     let newX = e.screenX - dragOffsetX.value;
     let newY = e.screenY - dragOffsetY.value;
-
     newX = Math.max(0, Math.min(newX, screenW - widgetW));
     newY = Math.max(0, Math.min(newY, screenH - widgetH));
 
@@ -50,13 +50,12 @@ const onDragMove = async (e) => {
     console.error(err);
   } finally {
     isMoving.value = false;
-    dragOffsetX.value = 0;
-    dragOffsetY.value = 0;
   }
 };
 
 const stopDrag = () => {
   isDragging.value = false;
+
   document.removeEventListener('mousemove', onDragMove);
   document.removeEventListener('mouseup', stopDrag);
 };
@@ -91,7 +90,7 @@ onMounted(async () => {
       await invoke('init_position');
       await getCurrentWindow().show();
       await getCurrentWindow().setFocus();
-    } catch (e) {
+    } catch {
       await getCurrentWindow().show();
     }
   }, 100);
@@ -123,11 +122,6 @@ onMounted(async () => {
   justify-content: center;
   height: 100vh;
   -webkit-app-region: no-drag;
-  cursor: grab;
-
-  &:active {
-    cursor: grabbing;
-  }
 
   &__button {
     position: relative;
@@ -138,12 +132,14 @@ onMounted(async () => {
     overflow: hidden;
     color: #ffffff;
     cursor: pointer;
+    user-select: none;
     outline: none;
     background-color: rgb(30 30 30 / 90%);
     border: 1px solid rgb(255 255 255 / 10%);
     border-radius: 30px;
     backdrop-filter: blur(10px);
     transition: all 0.3s ease;
+    will-change: transform;
 
     &:hover {
       background-color: rgb(50 50 50 / 95%);

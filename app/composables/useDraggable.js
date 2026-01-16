@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
 
-export function useDraggable(isPinnedRef) {
+export function useDraggable(isPinnedRef, isDragEnabledRef) {
   const isDragging = ref(false);
   const hasDragged = ref(false);
   const isMoving = ref(false);
@@ -90,6 +90,7 @@ export function useDraggable(isPinnedRef) {
 
   const startDrag = async (e) => {
     if (e.button !== 0) return;
+    if (!isDragEnabledRef.value) return;
 
     const scale = window.devicePixelRatio;
     const windowSize = await getCurrentWindow().outerSize();

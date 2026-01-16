@@ -2,8 +2,11 @@
 
 use std::mem;
 use std::time::Duration;
-use tauri::menu::{CheckMenuItem, Menu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::{command, Emitter, Manager, WebviewWindow};
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_positioner::{Position, WindowExt};
 
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
@@ -243,11 +246,65 @@ async fn move_widget(window: WebviewWindow, x: i32, y: i32, is_pinned: bool) {
 }
 
 #[command]
-async fn show_context_menu(app: tauri::AppHandle, window: WebviewWindow, is_pinned: bool) {
-    let toggle_pin =
-        CheckMenuItem::with_id(&app, "toggle_pin", "Pin", true, is_pinned, None::<&str>).unwrap();
+async fn init_position(window: WebviewWindow) {
+    let _ = window.as_ref().window().move_window(Position::BottomRight);
+}
 
-    let menu = Menu::with_items(&app, &[&toggle_pin]).unwrap();
+#[command]
+async fn show_context_menu(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    is_pinned: bool,
+    is_draggable: bool,
+) {
+    let autostart_manager = app.autolaunch();
+    let is_autostart = autostart_manager.is_enabled().unwrap_or(false);
+
+    let toggle_pin = CheckMenuItem::with_id(
+        &app,
+        "toggle_pin",
+        "Always on Top",
+        true,
+        is_pinned,
+        None::<&str>,
+    )
+    .unwrap();
+
+    let toggle_drag = CheckMenuItem::with_id(
+        &app,
+        "toggle_drag",
+        "Allow Drag",
+        true,
+        is_draggable,
+        None::<&str>,
+    )
+    .unwrap();
+
+    let separator = PredefinedMenuItem::separator(&app).unwrap();
+
+    let toggle_autostart = CheckMenuItem::with_id(
+        &app,
+        "toggle_autostart",
+        "Run on Startup",
+        true,
+        is_autostart,
+        None::<&str>,
+    )
+    .unwrap();
+
+    let kill_app = MenuItem::with_id(&app, "kill_app", "Kill Widget", true, None::<&str>).unwrap();
+
+    let menu = Menu::with_items(
+        &app,
+        &[
+            &toggle_pin,
+            &toggle_drag,
+            &separator,
+            &toggle_autostart,
+            &kill_app,
+        ],
+    )
+    .unwrap();
 
     let _ = window.popup_menu(&menu);
 }
@@ -255,10 +312,27 @@ async fn show_context_menu(app: tauri::AppHandle, window: WebviewWindow, is_pinn
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
-        .on_menu_event(|app, event| {
-            if event.id() == "toggle_pin" {
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "toggle_pin" => {
                 let _ = app.emit("menu-toggle-pin", ());
             }
+            "toggle_drag" => {
+                let _ = app.emit("menu-toggle-drag", ());
+            }
+            "toggle_autostart" => {
+                let manager = app.autolaunch();
+                if manager.is_enabled().unwrap_or(false) {
+                    let _ = manager.disable();
+                } else {
+                    let _ = manager.enable();
+                }
+            }
+            "kill_app" => app.exit(0),
+            _ => {}
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -294,7 +368,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             toggle_hdr,
             check_hdr_status,
-            setup_widget_window,
+            init_position,
+            setup_widget_window, // Убедись, что все твои команды тут
             set_pin_state,
             move_widget,
             show_context_menu

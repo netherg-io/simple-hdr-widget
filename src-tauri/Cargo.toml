@@ -20,3 +20,4 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging"
 ] }
 tokio = {version = "1.49.0", features = ["time"] }
+tauri-plugin-autostart = "2.5.1"

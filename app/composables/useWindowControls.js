@@ -4,8 +4,12 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export function useWindowControls() {
   const isPinned = useLocalStorage('is-pinned', () => false);
+  const isDragEnabled = useLocalStorage('is-drag-enabled', () => true);
+
   const isHovered = ref(false);
-  let unlistenMenu = null;
+
+  let unlistenMenuPin = null;
+  let unlistenMenuDrag = null; // <--- Слушатель для драга
   let unlistenMouse = null;
 
   const togglePin = async () => {
@@ -15,7 +19,10 @@ export function useWindowControls() {
 
   const onContextMenu = async (e) => {
     e.preventDefault();
-    await invoke('show_context_menu', { isPinned: isPinned.value });
+    await invoke('show_context_menu', {
+      isPinned: isPinned.value,
+      isDraggable: isDragEnabled.value,
+    });
   };
 
   const initWindow = async () => {
@@ -25,8 +32,10 @@ export function useWindowControls() {
   };
 
   onMounted(async () => {
-    unlistenMenu = await listen('menu-toggle-pin', () => {
-      togglePin();
+    unlistenMenuPin = await listen('menu-toggle-pin', () => togglePin());
+
+    unlistenMenuDrag = await listen('menu-toggle-drag', () => {
+      isDragEnabled.value = !isDragEnabled.value;
     });
 
     unlistenMouse = await listen('mouse-left-window', () => {
@@ -37,14 +46,15 @@ export function useWindowControls() {
   });
 
   onUnmounted(() => {
-    if (unlistenMenu) unlistenMenu();
+    if (unlistenMenuPin) unlistenMenuPin();
+    if (unlistenMenuDrag) unlistenMenuDrag();
     if (unlistenMouse) unlistenMouse();
   });
 
   return {
     isPinned,
+    isDragEnabled,
     isHovered,
-    togglePin,
     onContextMenu,
   };
 }

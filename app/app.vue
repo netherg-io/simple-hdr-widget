@@ -1,9 +1,10 @@
 <script setup>
-const { isPinned, isHovered, onContextMenu } = useWindowControls();
+const { isPinned, isDragEnabled, isHovered, onContextMenu } =
+  useWindowControls();
 
 const { isHdrOn, isLoading, toggleHdr } = useHdr();
 
-const { startDrag, hasDragged } = useDraggable(isPinned);
+const { startDrag, hasDragged } = useDraggable(isPinned, isDragEnabled);
 
 const onButtonClick = () => {
   if (!hasDragged.value) {

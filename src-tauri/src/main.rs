@@ -2,8 +2,8 @@
 
 use std::mem;
 use std::time::Duration;
+use tauri::menu::{CheckMenuItem, Menu};
 use tauri::{command, Emitter, Manager, WebviewWindow};
-use tauri_plugin_positioner::{Position, WindowExt};
 
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
@@ -15,7 +15,8 @@ use windows::Win32::Devices::Display::{
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetWindowLongW, GetWindowRect, SetWindowLongW, SetWindowPos, GWL_EXSTYLE,
-    HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    HWND_BOTTOM, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 const SET_ADVANCED_COLOR_STATE_VAL: i32 = 10;
@@ -172,7 +173,7 @@ async fn check_hdr_status() -> Result<bool, String> {
 }
 
 #[command]
-async fn apply_widget_styles(window: WebviewWindow) {
+async fn setup_widget_window(window: WebviewWindow) {
     let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
     let hwnd = HWND(tauri_hwnd.0 as *mut _);
 
@@ -195,31 +196,70 @@ async fn apply_widget_styles(window: WebviewWindow) {
 }
 
 #[command]
-async fn move_widget(window: WebviewWindow, x: i32, y: i32) {
+async fn set_pin_state(window: WebviewWindow, pinned: bool) {
     let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
     let hwnd = HWND(tauri_hwnd.0 as *mut _);
 
     unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_BOTTOM),
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        if pinned {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        } else {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_BOTTOM),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 
 #[command]
-async fn init_position(window: WebviewWindow) {
-    let _ = window.as_ref().window().move_window(Position::BottomRight);
+async fn move_widget(window: WebviewWindow, x: i32, y: i32, is_pinned: bool) {
+    let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
+    let hwnd = HWND(tauri_hwnd.0 as *mut _);
+
+    unsafe {
+        let z_order = if is_pinned { None } else { Some(HWND_BOTTOM) };
+        let flags = if is_pinned {
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER
+        } else {
+            SWP_NOSIZE | SWP_NOACTIVATE
+        };
+
+        let _ = SetWindowPos(hwnd, z_order, x, y, 0, 0, flags);
+    }
+}
+
+#[command]
+async fn show_context_menu(app: tauri::AppHandle, window: WebviewWindow, is_pinned: bool) {
+    let toggle_pin =
+        CheckMenuItem::with_id(&app, "toggle_pin", "Pin", true, is_pinned, None::<&str>).unwrap();
+
+    let menu = Menu::with_items(&app, &[&toggle_pin]).unwrap();
+
+    let _ = window.popup_menu(&menu);
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .on_menu_event(|app, event| {
+            if event.id() == "toggle_pin" {
+                let _ = app.emit("menu-toggle-pin", ());
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -254,9 +294,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             toggle_hdr,
             check_hdr_status,
-            init_position,
-            apply_widget_styles,
-            move_widget
+            setup_widget_window,
+            set_pin_state,
+            move_widget,
+            show_context_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

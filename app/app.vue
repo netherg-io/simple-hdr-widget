@@ -35,6 +35,8 @@ const onButtonClick = () => {
 
 <style lang="scss" scoped>
 .hdr-widget {
+  $parent: &;
+
   display: flex;
   align-items: stretch;
   justify-content: stretch;
@@ -44,11 +46,11 @@ const onButtonClick = () => {
   &__button {
     position: relative;
     display: flex;
-    gap: 10px;
+    gap: em(10);
     align-items: center;
     width: 100%;
-    padding: 10px 20px;
-    margin: 10px;
+    padding: em(10) em(20);
+    margin: em(10);
     overflow: hidden;
     color: #ffffff;
     cursor: pointer;
@@ -56,8 +58,8 @@ const onButtonClick = () => {
     outline: none;
     background-color: rgb(30 30 30 / 90%);
     border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 30px;
-    backdrop-filter: blur(10px);
+    border-radius: em(30);
+    backdrop-filter: blur(em(10));
     transition: all 0.3s ease;
     will-change: transform;
 
@@ -74,9 +76,9 @@ const onButtonClick = () => {
       background-color: rgb(0 120 212 / 90%);
       border-color: rgb(255 255 255 / 30%);
 
-      .hdr-widget__indicator {
+      #{$parent}__indicator {
         background-color: #ffffff;
-        box-shadow: 0 0 5px #ffffff;
+        box-shadow: 0 0 em(5) #ffffff;
       }
     }
 
@@ -88,8 +90,8 @@ const onButtonClick = () => {
   }
 
   &__indicator {
-    width: 8px;
-    height: 8px;
+    width: em(8);
+    height: em(8);
     background-color: #555555;
     border-radius: 50%;
     transition:
@@ -98,7 +100,7 @@ const onButtonClick = () => {
   }
 
   &__label {
-    font-size: 14px;
+    font-size: em(14);
     font-weight: 600;
     letter-spacing: 0.5px;
   }

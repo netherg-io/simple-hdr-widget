@@ -3,7 +3,9 @@
 use std::mem;
 use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{command, Emitter, Manager, Monitor, WebviewWindow, Wry};
+use tauri::{
+    command, Emitter, LogicalSize, Manager, Monitor, PhysicalPosition, Size, WebviewWindow, Wry,
+};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt;
 
@@ -21,6 +23,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
+const TARGET_WIDTH_LOGICAL: f64 = 160.0;
+const TARGET_HEIGHT_LOGICAL: f64 = 60.0;
+
 const SET_ADVANCED_COLOR_STATE_VAL: i32 = 10;
 const ENABLE_FLAG: u32 = 0x1;
 
@@ -34,6 +39,23 @@ struct HdrStatusPayload {
 struct DisplayConfigSetAdvancedColorState {
     pub header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
     pub value: u32,
+}
+
+fn enforce_logical_size(window: &WebviewWindow) {
+    if let Ok(current_size) = window.inner_size() {
+        let scale_factor = window.scale_factor().unwrap_or(1.0);
+        let current_logical_width = current_size.width as f64 / scale_factor;
+        let current_logical_height = current_size.height as f64 / scale_factor;
+
+        if (current_logical_width - TARGET_WIDTH_LOGICAL).abs() > 0.1
+            || (current_logical_height - TARGET_HEIGHT_LOGICAL).abs() > 0.1
+        {
+            let _ = window.set_size(Size::Logical(LogicalSize {
+                width: TARGET_WIDTH_LOGICAL,
+                height: TARGET_HEIGHT_LOGICAL,
+            }));
+        }
+    }
 }
 
 fn get_active_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
@@ -100,9 +122,7 @@ fn get_hdr_status_internal() -> bool {
 fn start_mouse_tracking(window: WebviewWindow) {
     std::thread::spawn(move || {
         let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
-
         let hwnd = HWND(tauri_hwnd.0 as *mut _);
-
         let mut was_inside = false;
 
         loop {
@@ -201,29 +221,18 @@ async fn setup_widget_window(window: WebviewWindow) {
 async fn set_pin_state(window: WebviewWindow, pinned: bool) {
     let tauri_hwnd = window.hwnd().expect("Failed to get HWND");
     let hwnd = HWND(tauri_hwnd.0 as *mut _);
+    let z_order = if pinned { HWND_TOPMOST } else { HWND_BOTTOM };
 
     unsafe {
-        if pinned {
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        } else {
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_BOTTOM),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
+        let _ = SetWindowPos(
+            hwnd,
+            Some(z_order),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -242,6 +251,27 @@ async fn move_widget(window: WebviewWindow, x: i32, y: i32, is_pinned: bool) {
 
         let _ = SetWindowPos(hwnd, z_order, x, y, 0, 0, flags);
     }
+    enforce_logical_size(&window);
+}
+
+fn get_current_relative_position(window: &WebviewWindow) -> Option<(f64, f64)> {
+    let monitor = window.current_monitor().ok().flatten()?;
+
+    let m_pos = monitor.position();
+    let m_size = monitor.size();
+    let w_pos = window.outer_position().ok()?;
+    let w_size = window.outer_size().ok()?;
+
+    let local_x = (w_pos.x - m_pos.x) as f64;
+    let local_y = (w_pos.y - m_pos.y) as f64;
+
+    let max_move_x = (m_size.width as f64 - w_size.width as f64).max(1.0);
+    let max_move_y = (m_size.height as f64 - w_size.height as f64).max(1.0);
+
+    let ratio_x = local_x / max_move_x;
+    let ratio_y = local_y / max_move_y;
+
+    Some((ratio_x, ratio_y))
 }
 
 #[command]
@@ -269,37 +299,57 @@ async fn restore_window(
     }
 
     if let Some(m) = target_monitor {
-        let scale = m.scale_factor();
+        let use_percentages = match (saved_x, saved_y) {
+            (Some(x), Some(y)) if x.abs() <= 1.0 && y.abs() <= 1.0 => Some((x, y)),
+            _ => None,
+        };
 
-        if let (Some(x), Some(y)) = (saved_x, saved_y) {
+        if let Some((px, py)) = use_percentages {
+            move_window_to_monitor(&window, &m, Some((px, py)));
+        } else if let (Some(x), Some(y)) = (saved_x, saved_y) {
+            let scale = m.scale_factor();
             let phys_x = (x * scale).round() as i32;
             let phys_y = (y * scale).round() as i32;
-
-            let _ = window.set_position(tauri::PhysicalPosition::new(phys_x, phys_y));
+            let _ = window.set_position(PhysicalPosition::new(phys_x, phys_y));
         } else {
-            move_window_to_monitor(&window, &m);
+            move_window_to_monitor(&window, &m, None);
         }
+        enforce_logical_size(&window);
     }
 }
 
-fn move_window_to_monitor(window: &WebviewWindow, monitor: &Monitor) {
-    let monitor_pos = monitor.position();
-    let monitor_size = monitor.size();
-    let target_scale = monitor.scale_factor();
+fn move_window_to_monitor(
+    window: &WebviewWindow,
+    monitor: &Monitor,
+    relative_pos: Option<(f64, f64)>,
+) {
+    let scale_factor = monitor.scale_factor();
+    let m_pos = monitor.position();
+    let m_size = monitor.size();
 
-    let window_size = window.outer_size().unwrap();
-    let current_scale = window.scale_factor().unwrap_or(1.0);
+    let target_w_phys = (TARGET_WIDTH_LOGICAL * scale_factor).round();
+    let target_h_phys = (TARGET_HEIGHT_LOGICAL * scale_factor).round();
 
-    let logical_width = window_size.width as f64 / current_scale;
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+        width: target_w_phys as u32,
+        height: target_h_phys as u32,
+    }));
 
-    let predicted_width = (logical_width * target_scale).round() as i32;
+    let (rx, ry) = relative_pos.unwrap_or((1.0, 0.0));
 
-    const PADDING: i32 = 0;
+    let space_w = m_size.width as f64 - target_w_phys;
+    let space_h = m_size.height as f64 - target_h_phys;
 
-    let new_x = monitor_pos.x + (monitor_size.width as i32 - predicted_width) - PADDING;
-    let new_y = monitor_pos.y + PADDING;
+    let new_local_x = space_w * rx;
+    let new_local_y = space_h * ry;
 
-    let _ = window.set_position(tauri::PhysicalPosition::new(new_x, new_y));
+    let new_x = m_pos.x as f64 + new_local_x;
+    let new_y = m_pos.y as f64 + new_local_y;
+
+    let _ = window.set_position(tauri::PhysicalPosition {
+        x: new_x.round() as i32,
+        y: new_y.round() as i32,
+    });
 }
 
 #[command]
@@ -415,24 +465,14 @@ fn main() {
                     if let Some(window) = app.get_webview_window("main") {
                         if let Ok(monitors) = window.available_monitors() {
                             if let Some(target_monitor) = monitors.get(index) {
-                                let target_name = target_monitor
+                                let rel_pos = get_current_relative_position(&window);
+                                move_window_to_monitor(&window, target_monitor, rel_pos);
+
+                                let name = target_monitor
                                     .name()
                                     .map(|s| s.to_string())
                                     .unwrap_or_default();
-
-                                if let Ok(Some(current_monitor)) = window.current_monitor() {
-                                    let current_name = current_monitor
-                                        .name()
-                                        .map(|s| s.to_string())
-                                        .unwrap_or_default();
-                                    if current_name == target_name {
-                                        return;
-                                    }
-                                }
-
-                                move_window_to_monitor(&window, target_monitor);
-
-                                let _ = app.emit("monitor-changed", target_name);
+                                let _ = app.emit("monitor-changed", name);
                             }
                         }
                     }
@@ -461,11 +501,29 @@ fn main() {
         })
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            if let Some(window) = app.get_webview_window("main") {
+                enforce_logical_size(&window);
+
+                let w_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::ScaleFactorChanged { .. } = event {
+                        enforce_logical_size(&w_clone);
+                    }
+                });
+
+                start_mouse_tracking(window);
+            }
+
             tauri::async_runtime::spawn(async move {
                 let mut previous_state = get_hdr_status_internal();
 
                 loop {
                     tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        enforce_logical_size(&window);
+                    }
 
                     let current_state = get_hdr_status_internal();
 
@@ -482,10 +540,6 @@ fn main() {
                     }
                 }
             });
-
-            if let Some(window) = app.get_webview_window("main") {
-                start_mouse_tracking(window);
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
